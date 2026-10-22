@@ -1,4 +1,4 @@
-# 🧪 LJP Testing Grounds
+#  LJP Testing Grounds
 
 A workspace for experimenting with AI, mostly Anthropic's **Claude**, and for the side projects that come out of it. Things here are works in progress.
 

@@ -1,3 +1,540 @@
+diff --git a/applications/services/desktop/desktop_settings.c b/applications/services/desktop/desktop_settings.c
+index f66fded..a64d7d4 100644
+--- a/applications/services/desktop/desktop_settings.c
++++ b/applications/services/desktop/desktop_settings.c
+@@ -59,6 +59,8 @@ void desktop_settings_load(DesktopSettings* settings) {
+     if(!success) {
+         FURI_LOG_W(TAG, "Failed to load file, using defaults");
+         memset(settings, 0, sizeof(DesktopSettings));
++        // LJP-OS: status bar clock on by default
++        settings->display_clock = 1;
+         desktop_settings_save(settings);
+     }
+ }
+diff --git a/applications/services/desktop/scenes/desktop_scene_lock_menu.c b/applications/services/desktop/scenes/desktop_scene_lock_menu.c
+index 5ca95c4..2f7bf66 100644
+--- a/applications/services/desktop/scenes/desktop_scene_lock_menu.c
++++ b/applications/services/desktop/scenes/desktop_scene_lock_menu.c
+@@ -1,9 +1,17 @@
+ #include <gui/scene_manager.h>
++#include <gui/gui_i.h>
+ #include <applications.h>
+ #include <furi_hal.h>
+ #include <toolbox/saved_struct.h>
+ #include <stdbool.h>
++#include <math.h>
+ #include <loader/loader.h>
++#include <notification/notification_messages.h>
++
++#ifdef SRV_BT
++#include <bt/bt_service/bt.h>
++#include <bt/bt_service/bt_settings_api_i.h>
++#endif
+ 
+ #include "../desktop_i.h"
+ #include <desktop/desktop_settings.h>
+@@ -12,6 +20,47 @@
+ 
+ #define TAG "DesktopSceneLock"
+ 
++// LJP-OS Quick Settings: brightness and volume move in 5% steps
++#define QUICK_SETTINGS_STEP           (5)
++#define QUICK_SETTINGS_BRIGHTNESS_MIN (5) // never let the panel turn the backlight fully off
++
++// Set when brightness or volume changed, so notification settings are saved once on exit
++static bool desktop_scene_lock_menu_notification_dirty = false;
++
++static const NotificationSequence sequence_volume_preview = {
++    &message_note_c5,
++    &message_delay_50,
++    &message_sound_off,
++    NULL,
++};
++
++static uint8_t desktop_scene_lock_menu_to_percent(float value) {
++    int32_t percent = lroundf(value * 100.0f / QUICK_SETTINGS_STEP) * QUICK_SETTINGS_STEP;
++    return CLAMP(percent, 100, 0);
++}
++
++static uint8_t desktop_scene_lock_menu_step(uint8_t percent, bool up, uint8_t min) {
++    int32_t next = (int32_t)percent + (up ? QUICK_SETTINGS_STEP : -QUICK_SETTINGS_STEP);
++    return CLAMP(next, 100, min);
++}
++
++static void desktop_scene_lock_menu_bt_sync(Desktop* desktop, bool toggle) {
++#ifdef SRV_BT
++    Bt* bt = furi_record_open(RECORD_BT);
++    BtSettings settings;
++    bt_get_settings(bt, &settings);
++    if(toggle) {
++        settings.enabled = !settings.enabled;
++        bt_set_settings(bt, &settings);
++    }
++    furi_record_close(RECORD_BT);
++    desktop_lock_menu_set_bt_state(desktop->lock_menu, true, settings.enabled);
++#else
++    UNUSED(toggle);
++    desktop_lock_menu_set_bt_state(desktop->lock_menu, false, false);
++#endif
++}
++
+ void desktop_scene_lock_menu_callback(DesktopEvent event, void* context) {
+     Desktop* desktop = (Desktop*)context;
+     view_dispatcher_send_custom_event(desktop->view_dispatcher, event);
+@@ -19,19 +68,28 @@ void desktop_scene_lock_menu_callback(DesktopEvent event, void* context) {
+ 
+ void desktop_scene_lock_menu_on_enter(void* context) {
+     Desktop* desktop = (Desktop*)context;
++    NotificationSettings* notification = &desktop->notification->settings;
+ 
+     scene_manager_set_scene_state(desktop->scene_manager, DesktopSceneLockMenu, 0);
+     desktop_lock_menu_set_callback(desktop->lock_menu, desktop_scene_lock_menu_callback, desktop);
+     desktop_lock_menu_set_dummy_mode_state(desktop->lock_menu, desktop->settings.dummy_mode);
+     desktop_lock_menu_set_stealth_mode_state(
+         desktop->lock_menu, furi_hal_rtc_is_flag_set(FuriHalRtcFlagStealthMode));
++    desktop_lock_menu_set_dark_mode_state(desktop->lock_menu, gui_get_dark_mode(desktop->gui));
++    desktop_lock_menu_set_brightness(
++        desktop->lock_menu, desktop_scene_lock_menu_to_percent(notification->display_brightness));
++    desktop_lock_menu_set_volume(
++        desktop->lock_menu, desktop_scene_lock_menu_to_percent(notification->speaker_volume));
++    desktop_scene_lock_menu_bt_sync(desktop, false);
+     desktop_lock_menu_set_idx(desktop->lock_menu, 0);
++    desktop_scene_lock_menu_notification_dirty = false;
+ 
+     view_dispatcher_switch_to_view(desktop->view_dispatcher, DesktopViewIdLockMenu);
+ }
+ 
+ bool desktop_scene_lock_menu_on_event(void* context, SceneManagerEvent event) {
+     Desktop* desktop = (Desktop*)context;
++    NotificationSettings* notification = &desktop->notification->settings;
+     bool consumed = false;
+ 
+     if(event.type == SceneManagerEventTypeTick) {
+@@ -47,25 +105,59 @@ bool desktop_scene_lock_menu_on_event(void* context, SceneManagerEvent event) {
+             desktop_lock(desktop);
+             consumed = true;
+             break;
++        // Toggles stay in the panel so several settings can be changed in one visit
+         case DesktopLockMenuEventDummyModeOn:
+-            desktop_set_dummy_mode_state(desktop, true);
+-            scene_manager_search_and_switch_to_previous_scene(
+-                desktop->scene_manager, DesktopSceneMain);
+-            break;
+-        case DesktopLockMenuEventDummyModeOff:
+-            desktop_set_dummy_mode_state(desktop, false);
+-            scene_manager_search_and_switch_to_previous_scene(
+-                desktop->scene_manager, DesktopSceneMain);
++        case DesktopLockMenuEventDummyModeOff: {
++            const bool enabled = (event.event == DesktopLockMenuEventDummyModeOn);
++            desktop_set_dummy_mode_state(desktop, enabled);
++            desktop_lock_menu_set_dummy_mode_state(desktop->lock_menu, enabled);
++            consumed = true;
+             break;
++        }
+         case DesktopLockMenuEventStealthModeOn:
+-            desktop_set_stealth_mode_state(desktop, true);
+-            scene_manager_search_and_switch_to_previous_scene(
+-                desktop->scene_manager, DesktopSceneMain);
++        case DesktopLockMenuEventStealthModeOff: {
++            const bool enabled = (event.event == DesktopLockMenuEventStealthModeOn);
++            desktop_set_stealth_mode_state(desktop, enabled);
++            desktop_lock_menu_set_stealth_mode_state(desktop->lock_menu, enabled);
++            consumed = true;
+             break;
+-        case DesktopLockMenuEventStealthModeOff:
+-            desktop_set_stealth_mode_state(desktop, false);
+-            scene_manager_search_and_switch_to_previous_scene(
+-                desktop->scene_manager, DesktopSceneMain);
++        }
++        case DesktopLockMenuEventDarkModeToggle: {
++            const bool enabled = !gui_get_dark_mode(desktop->gui);
++            gui_set_dark_mode(desktop->gui, enabled);
++            desktop_lock_menu_set_dark_mode_state(desktop->lock_menu, enabled);
++            consumed = true;
++            break;
++        }
++        case DesktopLockMenuEventBrightnessUp:
++        case DesktopLockMenuEventBrightnessDown: {
++            const uint8_t percent = desktop_scene_lock_menu_step(
++                desktop_scene_lock_menu_to_percent(notification->display_brightness),
++                event.event == DesktopLockMenuEventBrightnessUp,
++                QUICK_SETTINGS_BRIGHTNESS_MIN);
++            notification->display_brightness = percent / 100.0f;
++            notification_message(desktop->notification, &sequence_display_backlight_on);
++            desktop_lock_menu_set_brightness(desktop->lock_menu, percent);
++            desktop_scene_lock_menu_notification_dirty = true;
++            consumed = true;
++            break;
++        }
++        case DesktopLockMenuEventVolumeUp:
++        case DesktopLockMenuEventVolumeDown: {
++            const uint8_t percent = desktop_scene_lock_menu_step(
++                desktop_scene_lock_menu_to_percent(notification->speaker_volume),
++                event.event == DesktopLockMenuEventVolumeUp,
++                0);
++            notification->speaker_volume = percent / 100.0f;
++            notification_message(desktop->notification, &sequence_volume_preview);
++            desktop_lock_menu_set_volume(desktop->lock_menu, percent);
++            desktop_scene_lock_menu_notification_dirty = true;
++            consumed = true;
++            break;
++        }
++        case DesktopLockMenuEventBluetoothToggle:
++            desktop_scene_lock_menu_bt_sync(desktop, true);
++            consumed = true;
+             break;
+         default:
+             break;
+@@ -77,5 +169,10 @@ bool desktop_scene_lock_menu_on_event(void* context, SceneManagerEvent event) {
+ }
+ 
+ void desktop_scene_lock_menu_on_exit(void* context) {
+-    UNUSED(context);
++    Desktop* desktop = (Desktop*)context;
++
++    if(desktop_scene_lock_menu_notification_dirty) {
++        notification_message_save_settings(desktop->notification);
++        desktop_scene_lock_menu_notification_dirty = false;
++    }
+ }
+diff --git a/applications/services/desktop/views/desktop_events.h b/applications/services/desktop/views/desktop_events.h
+index 07631df..136b21f 100644
+--- a/applications/services/desktop/views/desktop_events.h
++++ b/applications/services/desktop/views/desktop_events.h
+@@ -38,6 +38,12 @@ typedef enum {
+     DesktopLockMenuEventDummyModeOff,
+     DesktopLockMenuEventStealthModeOn,
+     DesktopLockMenuEventStealthModeOff,
++    DesktopLockMenuEventDarkModeToggle,
++    DesktopLockMenuEventBrightnessUp,
++    DesktopLockMenuEventBrightnessDown,
++    DesktopLockMenuEventVolumeUp,
++    DesktopLockMenuEventVolumeDown,
++    DesktopLockMenuEventBluetoothToggle,
+ 
+     DesktopAnimationEventCheckAnimation,
+     DesktopAnimationEventNewIdleAnimation,
+diff --git a/applications/services/desktop/views/desktop_view_lock_menu.c b/applications/services/desktop/views/desktop_view_lock_menu.c
+index 1b6bdab..a3221e1 100644
+--- a/applications/services/desktop/views/desktop_view_lock_menu.c
++++ b/applications/services/desktop/views/desktop_view_lock_menu.c
+@@ -5,14 +5,24 @@
+ #include "../desktop_i.h"
+ #include "desktop_view_lock_menu.h"
+ 
++// LJP-OS Quick Settings panel, opened with Up from the desktop
+ typedef enum {
+     DesktopLockMenuIndexLock,
++    DesktopLockMenuIndexDarkMode,
++    DesktopLockMenuIndexBrightness,
++    DesktopLockMenuIndexVolume,
++    DesktopLockMenuIndexBluetooth,
+     DesktopLockMenuIndexStealth,
+     DesktopLockMenuIndexDummy,
+ 
+     DesktopLockMenuIndexTotalCount
+ } DesktopLockMenuIndex;
+ 
++#define LOCK_MENU_ITEMS_ON_SCREEN (4U)
++#define LOCK_MENU_ITEM_HEIGHT     (12U)
++#define LOCK_MENU_TOP             (STATUS_BAR_Y_SHIFT + 1)
++#define LOCK_MENU_ITEM_WIDTH      (123U)
++
+ void desktop_lock_menu_set_callback(
+     DesktopLockMenuView* lock_menu,
+     DesktopLockMenuViewCallback callback,
+@@ -39,45 +49,128 @@ void desktop_lock_menu_set_stealth_mode_state(DesktopLockMenuView* lock_menu, bo
+         true);
+ }
+ 
++void desktop_lock_menu_set_dark_mode_state(DesktopLockMenuView* lock_menu, bool dark_mode) {
++    with_view_model(
++        lock_menu->view, DesktopLockMenuViewModel * model, { model->dark_mode = dark_mode; }, true);
++}
++
++void desktop_lock_menu_set_brightness(DesktopLockMenuView* lock_menu, uint8_t percent) {
++    with_view_model(
++        lock_menu->view, DesktopLockMenuViewModel * model, { model->brightness = percent; }, true);
++}
++
++void desktop_lock_menu_set_volume(DesktopLockMenuView* lock_menu, uint8_t percent) {
++    with_view_model(
++        lock_menu->view, DesktopLockMenuViewModel * model, { model->volume = percent; }, true);
++}
++
++void desktop_lock_menu_set_bt_state(DesktopLockMenuView* lock_menu, bool available, bool enabled) {
++    with_view_model(
++        lock_menu->view,
++        DesktopLockMenuViewModel * model,
++        {
++            model->bt_available = available;
++            model->bt_enabled = enabled;
++        },
++        true);
++}
++
+ void desktop_lock_menu_set_idx(DesktopLockMenuView* lock_menu, uint8_t idx) {
+     furi_assert(idx < DesktopLockMenuIndexTotalCount);
+     with_view_model(
+-        lock_menu->view, DesktopLockMenuViewModel * model, { model->idx = idx; }, true);
++        lock_menu->view,
++        DesktopLockMenuViewModel * model,
++        {
++            model->idx = idx;
++            model->window_offset = 0;
++        },
++        true);
++}
++
++static const char* desktop_lock_menu_on_off(bool value) {
++    return value ? "ON" : "OFF";
++}
++
++static void desktop_lock_menu_draw_item(
++    Canvas* canvas,
++    DesktopLockMenuViewModel* m,
++    uint8_t item,
++    int32_t y) {
++    const char* label = NULL;
++    const char* value = NULL;
++    char buffer[12];
++    const bool selected = (m->idx == item);
++
++    switch(item) {
++    case DesktopLockMenuIndexLock:
++        label = "Lock";
++        break;
++    case DesktopLockMenuIndexDarkMode:
++        label = "Dark Mode";
++        value = desktop_lock_menu_on_off(m->dark_mode);
++        break;
++    case DesktopLockMenuIndexBrightness:
++    case DesktopLockMenuIndexVolume: {
++        const bool is_brightness = (item == DesktopLockMenuIndexBrightness);
++        const uint8_t percent = is_brightness ? m->brightness : m->volume;
++        label = is_brightness ? "Brightness" : "Volume";
++        // Arrows show which rows Left/Right can adjust
++        snprintf(buffer, sizeof(buffer), selected ? "< %u%% >" : "%u%%", (unsigned)percent);
++        value = buffer;
++        break;
++    }
++    case DesktopLockMenuIndexBluetooth:
++        label = "Bluetooth";
++        value = m->bt_available ? desktop_lock_menu_on_off(m->bt_enabled) : "N/A";
++        break;
++    case DesktopLockMenuIndexStealth:
++        label = "Mute";
++        value = desktop_lock_menu_on_off(m->stealth_mode);
++        break;
++    case DesktopLockMenuIndexDummy:
++        label = "Dummy Mode";
++        value = desktop_lock_menu_on_off(m->dummy_mode);
++        break;
++    default:
++        return;
++    }
++
++    if(selected) {
++        canvas_set_color(canvas, ColorBlack);
++        canvas_draw_rbox(canvas, 0, y, LOCK_MENU_ITEM_WIDTH, LOCK_MENU_ITEM_HEIGHT, 2);
++        canvas_set_color(canvas, ColorWhite);
++    }
++
++    const int32_t baseline = y + LOCK_MENU_ITEM_HEIGHT - 3;
++    canvas_draw_str(canvas, 4, baseline, label);
++    if(value) {
++        canvas_draw_str_aligned(
++            canvas, LOCK_MENU_ITEM_WIDTH - 4, baseline, AlignRight, AlignBottom, value);
++    }
++
++    canvas_set_color(canvas, ColorBlack);
+ }
+ 
+ void desktop_lock_menu_draw_callback(Canvas* canvas, void* model) {
+     DesktopLockMenuViewModel* m = model;
+ 
+     canvas_set_color(canvas, ColorBlack);
+-    canvas_draw_icon(canvas, -57, 0 + STATUS_BAR_Y_SHIFT, &I_DoorLeft_70x55);
+-    canvas_draw_icon(canvas, 116, 0 + STATUS_BAR_Y_SHIFT, &I_DoorRight_70x55);
+     canvas_set_font(canvas, FontSecondary);
+ 
+-    for(size_t i = 0; i < DesktopLockMenuIndexTotalCount; ++i) {
+-        const char* str = NULL;
+-
+-        if(i == DesktopLockMenuIndexLock) {
+-            str = "Lock";
+-        } else if(i == DesktopLockMenuIndexStealth) {
+-            if(m->stealth_mode) {
+-                str = "Unmute";
+-            } else {
+-                str = "Mute";
+-            }
+-        } else if(i == DesktopLockMenuIndexDummy) { //-V547
+-            if(m->dummy_mode) {
+-                str = "Default Mode";
+-            } else {
+-                str = "Dummy Mode";
+-            }
+-        }
+-
+-        if(str) //-V547
+-            canvas_draw_str_aligned(
+-                canvas, 64, 9 + (i * 17) + STATUS_BAR_Y_SHIFT, AlignCenter, AlignCenter, str);
+-
+-        if(m->idx == i) elements_frame(canvas, 15, 1 + (i * 17) + STATUS_BAR_Y_SHIFT, 98, 15);
++    for(uint8_t i = 0; i < LOCK_MENU_ITEMS_ON_SCREEN; i++) {
++        const uint8_t item = m->window_offset + i;
++        if(item >= DesktopLockMenuIndexTotalCount) break;
++        desktop_lock_menu_draw_item(
++            canvas, m, item, LOCK_MENU_TOP + (int32_t)(i * LOCK_MENU_ITEM_HEIGHT));
+     }
++
++    elements_scrollbar_pos(
++        canvas,
++        128,
++        LOCK_MENU_TOP,
++        LOCK_MENU_ITEMS_ON_SCREEN * LOCK_MENU_ITEM_HEIGHT,
++        m->idx,
++        DesktopLockMenuIndexTotalCount);
+ }
+ 
+ View* desktop_lock_menu_get_view(DesktopLockMenuView* lock_menu) {
+@@ -85,6 +178,15 @@ View* desktop_lock_menu_get_view(DesktopLockMenuView* lock_menu) {
+     return lock_menu->view;
+ }
+ 
++static void desktop_lock_menu_scroll_to(DesktopLockMenuViewModel* model, uint8_t idx) {
++    model->idx = idx;
++    if(idx < model->window_offset) {
++        model->window_offset = idx;
++    } else if(idx >= model->window_offset + LOCK_MENU_ITEMS_ON_SCREEN) {
++        model->window_offset = idx - LOCK_MENU_ITEMS_ON_SCREEN + 1;
++    }
++}
++
+ bool desktop_lock_menu_input_callback(InputEvent* event, void* context) {
+     furi_assert(event);
+     furi_assert(context);
+@@ -96,25 +198,23 @@ bool desktop_lock_menu_input_callback(InputEvent* event, void* context) {
+     bool stealth_mode = false;
+     bool update = false;
+ 
++    const bool is_press = (event->type == InputTypeShort) || (event->type == InputTypeRepeat);
++
+     with_view_model(
+         lock_menu->view,
+         DesktopLockMenuViewModel * model,
+         {
+-            if((event->type == InputTypeShort) || (event->type == InputTypeRepeat)) {
++            if(is_press) {
+                 if(event->key == InputKeyUp) {
+-                    if(model->idx == 0) {
+-                        model->idx = DesktopLockMenuIndexTotalCount - 1;
+-                    } else {
+-                        model->idx = CLAMP(model->idx - 1, DesktopLockMenuIndexTotalCount - 1, 0);
+-                    }
++                    desktop_lock_menu_scroll_to(
++                        model,
++                        model->idx == 0 ? DesktopLockMenuIndexTotalCount - 1 : model->idx - 1);
+                     update = true;
+                     consumed = true;
+                 } else if(event->key == InputKeyDown) {
+-                    if(model->idx == DesktopLockMenuIndexTotalCount - 1) {
+-                        model->idx = 0;
+-                    } else {
+-                        model->idx = CLAMP(model->idx + 1, DesktopLockMenuIndexTotalCount - 1, 0);
+-                    }
++                    desktop_lock_menu_scroll_to(
++                        model,
++                        model->idx == DesktopLockMenuIndexTotalCount - 1 ? 0 : model->idx + 1);
+                     update = true;
+                     consumed = true;
+                 }
+@@ -125,22 +225,36 @@ bool desktop_lock_menu_input_callback(InputEvent* event, void* context) {
+         },
+         update);
+ 
+-    if(event->key == InputKeyOk) {
+-        if(idx == DesktopLockMenuIndexLock) {
+-            if(event->type == InputTypeShort) {
++    if(event->key == InputKeyLeft || event->key == InputKeyRight) {
++        const bool increase = (event->key == InputKeyRight);
++        if(is_press && idx == DesktopLockMenuIndexBrightness) {
++            lock_menu->callback(
++                increase ? DesktopLockMenuEventBrightnessUp : DesktopLockMenuEventBrightnessDown,
++                lock_menu->context);
++        } else if(is_press && idx == DesktopLockMenuIndexVolume) {
++            lock_menu->callback(
++                increase ? DesktopLockMenuEventVolumeUp : DesktopLockMenuEventVolumeDown,
++                lock_menu->context);
++        }
++        consumed = true;
++    } else if(event->key == InputKeyOk) {
++        if(event->type == InputTypeShort) {
++            if(idx == DesktopLockMenuIndexLock) {
+                 lock_menu->callback(DesktopLockMenuEventLock, lock_menu->context);
+-            }
+-        } else if(idx == DesktopLockMenuIndexStealth) {
+-            if((stealth_mode == false) && (event->type == InputTypeShort)) {
+-                lock_menu->callback(DesktopLockMenuEventStealthModeOn, lock_menu->context);
+-            } else if((stealth_mode == true) && (event->type == InputTypeShort)) {
+-                lock_menu->callback(DesktopLockMenuEventStealthModeOff, lock_menu->context);
+-            }
+-        } else if(idx == DesktopLockMenuIndexDummy) {
+-            if((dummy_mode == false) && (event->type == InputTypeShort)) {
+-                lock_menu->callback(DesktopLockMenuEventDummyModeOn, lock_menu->context);
+-            } else if((dummy_mode == true) && (event->type == InputTypeShort)) {
+-                lock_menu->callback(DesktopLockMenuEventDummyModeOff, lock_menu->context);
++            } else if(idx == DesktopLockMenuIndexDarkMode) {
++                lock_menu->callback(DesktopLockMenuEventDarkModeToggle, lock_menu->context);
++            } else if(idx == DesktopLockMenuIndexBluetooth) {
++                lock_menu->callback(DesktopLockMenuEventBluetoothToggle, lock_menu->context);
++            } else if(idx == DesktopLockMenuIndexStealth) {
++                lock_menu->callback(
++                    stealth_mode ? DesktopLockMenuEventStealthModeOff :
++                                   DesktopLockMenuEventStealthModeOn,
++                    lock_menu->context);
++            } else if(idx == DesktopLockMenuIndexDummy) {
++                lock_menu->callback(
++                    dummy_mode ? DesktopLockMenuEventDummyModeOff :
++                                 DesktopLockMenuEventDummyModeOn,
++                    lock_menu->context);
+             }
+         }
+         consumed = true;
+diff --git a/applications/services/desktop/views/desktop_view_lock_menu.h b/applications/services/desktop/views/desktop_view_lock_menu.h
+index a44e6b1..acfef4e 100644
+--- a/applications/services/desktop/views/desktop_view_lock_menu.h
++++ b/applications/services/desktop/views/desktop_view_lock_menu.h
+@@ -15,10 +15,17 @@ struct DesktopLockMenuView {
+     void* context;
+ };
+ 
++// LJP-OS: the lock menu doubles as the Quick Settings panel
+ typedef struct {
+     uint8_t idx;
++    uint8_t window_offset;
+     bool dummy_mode;
+     bool stealth_mode;
++    bool dark_mode;
++    uint8_t brightness;
++    uint8_t volume;
++    bool bt_available;
++    bool bt_enabled;
+ } DesktopLockMenuViewModel;
+ 
+ void desktop_lock_menu_set_callback(
+@@ -29,6 +36,10 @@ void desktop_lock_menu_set_callback(
+ View* desktop_lock_menu_get_view(DesktopLockMenuView* lock_menu);
+ void desktop_lock_menu_set_dummy_mode_state(DesktopLockMenuView* lock_menu, bool dummy_mode);
+ void desktop_lock_menu_set_stealth_mode_state(DesktopLockMenuView* lock_menu, bool stealth_mode);
++void desktop_lock_menu_set_dark_mode_state(DesktopLockMenuView* lock_menu, bool dark_mode);
++void desktop_lock_menu_set_brightness(DesktopLockMenuView* lock_menu, uint8_t percent);
++void desktop_lock_menu_set_volume(DesktopLockMenuView* lock_menu, uint8_t percent);
++void desktop_lock_menu_set_bt_state(DesktopLockMenuView* lock_menu, bool available, bool enabled);
+ void desktop_lock_menu_set_idx(DesktopLockMenuView* lock_menu, uint8_t idx);
+ DesktopLockMenuView* desktop_lock_menu_alloc(void);
+ void desktop_lock_menu_free(DesktopLockMenuView* lock_menu);
 diff --git a/applications/services/gui/canvas.c b/applications/services/gui/canvas.c
 index 2c42f60..8acddef 100644
 --- a/applications/services/gui/canvas.c
@@ -90,13 +627,15 @@ index 30c96b4..b72159e 100644
   *
   * @param      u8g2     u8g2 instance
 diff --git a/applications/services/gui/gui.c b/applications/services/gui/gui.c
-index 24ea57b..c3c764e 100644
+index 24ea57b..b233567 100644
 --- a/applications/services/gui/gui.c
 +++ b/applications/services/gui/gui.c
-@@ -1,8 +1,61 @@
+@@ -1,8 +1,109 @@
  #include "gui_i.h"
  #include <assets_icons.h>
 +#include <toolbox/saved_struct.h>
++#include <furi_hal_version.h>
++#include <u8g2.h>
 +
 +#ifdef SRV_STORAGE
 +#include <storage/storage.h>
@@ -152,16 +691,66 @@ index 24ea57b..c3c764e 100644
 +    return canvas_is_inverted(gui->canvas);
 +}
 +
++#ifndef FURI_RAM_EXEC
++#define GUI_SPLASH_STEPS    (16U)
++#define GUI_SPLASH_STEP_MS  (75U)
++#define GUI_SPLASH_BAR_X    (32U)
++#define GUI_SPLASH_BAR_Y    (54U)
++#define GUI_SPLASH_BAR_W    (64U)
++#define GUI_SPLASH_BAR_H    (5U)
++
++static void gui_draw_boot_splash_frame(Canvas* canvas, const char* version, uint32_t step) {
++    canvas_reset(canvas);
++
++    canvas_set_custom_u8g2_font(canvas, u8g2_font_logisoso22_tr);
++    canvas_draw_str_aligned(canvas, 64, 28, AlignCenter, AlignBottom, "LJP-OS");
++    canvas_draw_line(canvas, 26, 32, 101, 32);
++
++    canvas_set_font(canvas, FontSecondary);
++    canvas_draw_str_aligned(canvas, 64, 44, AlignCenter, AlignBottom, version);
++
++    canvas_draw_frame(
++        canvas, GUI_SPLASH_BAR_X, GUI_SPLASH_BAR_Y, GUI_SPLASH_BAR_W, GUI_SPLASH_BAR_H);
++    const uint32_t fill = (GUI_SPLASH_BAR_W - 4) * step / GUI_SPLASH_STEPS;
++    if(fill) {
++        canvas_draw_box(
++            canvas, GUI_SPLASH_BAR_X + 2, GUI_SPLASH_BAR_Y + 2, fill, GUI_SPLASH_BAR_H - 4);
++    }
++
++    canvas_commit(canvas);
++}
++
++// LJP-OS boot splash: shown by the GUI thread before it starts drawing the
++// desktop, while the other services keep starting in their own threads
++static void gui_draw_boot_splash(Gui* gui) {
++    const Version* ver = furi_hal_version_get_firmware_version();
++    char version[32];
++    snprintf(
++        version, sizeof(version), "based on Official %s", ver ? version_get_version(ver) : "");
++
++    for(uint32_t step = 0; step <= GUI_SPLASH_STEPS; step++) {
++        gui_lock(gui);
++        gui_draw_boot_splash_frame(gui->canvas, version, step);
++        gui_unlock(gui);
++        furi_delay_ms(GUI_SPLASH_STEP_MS);
++    }
++}
++#endif
++
  ViewPort* gui_view_port_find_enabled(ViewPortArray_t array) {
      // Iterating backward
      ViewPortArray_it_t it;
-@@ -553,6 +606,10 @@ int32_t gui_srv(void* p) {
+@@ -553,6 +654,14 @@ int32_t gui_srv(void* p) {
  
      furi_record_create(RECORD_GUI, gui);
  
 +    // After the record exists so nothing waits on us while storage starts,
 +    // before the loop so the first frame is already in the right mode
 +    gui_settings_load(gui);
++
++#ifndef FURI_RAM_EXEC
++    gui_draw_boot_splash(gui);
++#endif
 +
      while(1) {
          uint32_t flags =
@@ -189,6 +778,109 @@ index 8bd3215..170b422 100644
 + * @return     true if dark mode is enabled
 + */
 +bool gui_get_dark_mode(Gui* gui);
+diff --git a/applications/services/power/power_service/power.c b/applications/services/power/power_service/power.c
+index fa86328..d613f8c 100644
+--- a/applications/services/power/power_service/power.c
++++ b/applications/services/power/power_service/power.c
+@@ -2,6 +2,7 @@
+ 
+ #include <furi.h>
+ #include <furi_hal.h>
++#include <u8g2.h>
+ 
+ #include <update_util/update_operation.h>
+ #include <notification/notification_messages.h>
+@@ -14,13 +15,41 @@
+ #define POWER_VBUS_LOW_THRESHOLD   (4.0f)
+ #define POWER_HEALTH_LOW_THRESHOLD (70U)
+ 
++// LJP-OS: battery percentage is drawn left of the battery icon in a monospace
++// font, so the view port width can be computed without a canvas
++#define POWER_BATTERY_PCT_CHAR_WIDTH (4U)
++#define POWER_BATTERY_PCT_GAP        (2U)
++
++static size_t power_battery_pct_format(Power* power, char* buffer, size_t size) {
++    if(!power->info.gauge_is_ok) {
++        buffer[0] = '\0';
++        return 0;
++    }
++    return snprintf(buffer, size, "%u%%", (unsigned)power->info.charge);
++}
++
++static uint8_t power_battery_pct_width(Power* power) {
++    char pct[8];
++    size_t length = power_battery_pct_format(power, pct, sizeof(pct));
++    return length ? length * POWER_BATTERY_PCT_CHAR_WIDTH + POWER_BATTERY_PCT_GAP : 0;
++}
++
+ static void power_draw_battery_callback(Canvas* canvas, void* context) {
+     furi_assert(context);
+     Power* power = context;
+-    canvas_draw_icon(canvas, 0, 0, &I_Battery_26x8);
++
++    char pct[8];
++    const uint8_t x = power_battery_pct_width(power);
++    if(power_battery_pct_format(power, pct, sizeof(pct))) {
++        canvas_set_custom_u8g2_font(canvas, u8g2_font_4x6_tr);
++        canvas_draw_str(canvas, 0, 7, pct);
++        canvas_set_font(canvas, FontSecondary);
++    }
++
++    canvas_draw_icon(canvas, x, 0, &I_Battery_26x8);
+ 
+     if(power->info.gauge_is_ok) {
+-        canvas_draw_box(canvas, 2, 2, (power->info.charge + 4) / 5, 4);
++        canvas_draw_box(canvas, x + 2, 2, (power->info.charge + 4) / 5, 4);
+ 
+         if(power->info.voltage_battery_charge_limit < 4.2f) {
+             // Battery charge voltage limit is modified, indicate with cross pattern
+@@ -28,10 +57,10 @@ static void power_draw_battery_callback(Canvas* canvas, void* context) {
+             uint8_t battery_bar_width = (power->info.charge + 4) / 5;
+             bool cross_odd = false;
+             // Start 1 further in from the battery bar's x position
+-            for(uint8_t x = 3; x <= battery_bar_width; x++) {
++            for(uint8_t i = 3; i <= battery_bar_width; i++) {
+                 // Cross pattern is from the center of the battery bar
+                 // y = 2 + 1 (inset) + 1 (for every other)
+-                canvas_draw_dot(canvas, x, 3 + (uint8_t)cross_odd);
++                canvas_draw_dot(canvas, x + i, 3 + (uint8_t)cross_odd);
+                 cross_odd = !cross_odd;
+             }
+             canvas_invert_color(canvas);
+@@ -41,17 +70,22 @@ static void power_draw_battery_callback(Canvas* canvas, void* context) {
+             canvas_set_bitmap_mode(canvas, 1);
+             canvas_set_color(canvas, ColorWhite);
+             // -1 used here to overflow u8 number and render is outside of the area
+-            canvas_draw_icon(canvas, 8, -1, &I_Charging_lightning_mask_9x10);
++            canvas_draw_icon(canvas, x + 8, -1, &I_Charging_lightning_mask_9x10);
+             canvas_set_color(canvas, ColorBlack);
+-            canvas_draw_icon(canvas, 8, -1, &I_Charging_lightning_9x10);
++            canvas_draw_icon(canvas, x + 8, -1, &I_Charging_lightning_9x10);
+             canvas_set_bitmap_mode(canvas, 0);
+         }
+ 
+     } else {
+-        canvas_draw_box(canvas, 8, 3, 8, 2);
++        canvas_draw_box(canvas, x + 8, 3, 8, 2);
+     }
+ }
+ 
++static void power_battery_view_port_update_width(Power* power) {
++    view_port_set_width(
++        power->battery_view_port, icon_get_width(&I_Battery_26x8) + power_battery_pct_width(power));
++}
++
+ static ViewPort* power_battery_view_port_alloc(Power* power) {
+     ViewPort* battery_view_port = view_port_alloc();
+     view_port_set_width(battery_view_port, icon_get_width(&I_Battery_26x8));
+@@ -162,6 +196,7 @@ static void power_check_low_battery(Power* power) {
+ static void power_check_battery_level_change(Power* power) {
+     if(power->battery_level != power->info.charge) {
+         power->battery_level = power->info.charge;
++        power_battery_view_port_update_width(power);
+         power->event.type = PowerEventTypeBatteryLevelChanged;
+         power->event.data.battery_level = power->battery_level;
+         furi_pubsub_publish(power->event_pubsub, &power->event);
 diff --git a/applications/settings/about/about.c b/applications/settings/about/about.c
 index e066db2..199b8b3 100644
 --- a/applications/settings/about/about.c

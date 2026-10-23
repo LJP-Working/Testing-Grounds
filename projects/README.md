@@ -8,4 +8,4 @@ One folder per project. To start a new one:
 
 | Project | Status |
 | --- | --- |
-| *(none yet)* | |
+| [flipper-zero](flipper-zero/) | 🚧 In progress |

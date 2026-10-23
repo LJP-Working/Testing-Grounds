@@ -1,3 +1,194 @@
+diff --git a/applications/services/gui/canvas.c b/applications/services/gui/canvas.c
+index 2c42f60..8acddef 100644
+--- a/applications/services/gui/canvas.c
++++ b/applications/services/gui/canvas.c
+@@ -16,6 +16,7 @@ const CanvasFontParameters canvas_font_params[FontTotalNumber] = {
+ 
+ Canvas* canvas_init(void) {
+     Canvas* canvas = malloc(sizeof(Canvas));
++    canvas->inverted = false;
+     canvas->compress_icon = compress_icon_alloc(ICON_DECOMPRESSOR_BUFFER_SIZE);
+ 
+     // Initialize mutex
+@@ -67,8 +68,32 @@ void canvas_reset(Canvas* canvas) {
+     canvas_set_font_direction(canvas, CanvasDirectionLeftToRight);
+ }
+ 
++static void canvas_invert_buffer(Canvas* canvas) {
++    uint8_t* buffer = canvas_get_buffer(canvas);
++    size_t size = canvas_get_buffer_size(canvas);
++    for(size_t i = 0; i < size; i++) {
++        buffer[i] = ~buffer[i];
++    }
++}
++
++void canvas_set_inverted(Canvas* canvas, bool inverted) {
++    furi_check(canvas);
++    canvas->inverted = inverted;
++}
++
++bool canvas_is_inverted(const Canvas* canvas) {
++    furi_check(canvas);
++    return canvas->inverted;
++}
++
+ void canvas_commit(Canvas* canvas) {
+     furi_check(canvas);
++    // Dark mode: invert the outgoing frame so the LCD and screen streaming both
++    // show it, then restore it below, since direct draw apps keep drawing into
++    // the same buffer between commits
++    const bool inverted = canvas->inverted;
++    if(inverted) canvas_invert_buffer(canvas);
++
+     u8g2_SendBuffer(&canvas->fb);
+ 
+     // Iterate over callbacks
+@@ -82,6 +107,8 @@ void canvas_commit(Canvas* canvas) {
+                 p->context);
+         }
+     canvas_unlock(canvas);
++
++    if(inverted) canvas_invert_buffer(canvas);
+ }
+ 
+ uint8_t* canvas_get_buffer(Canvas* canvas) {
+diff --git a/applications/services/gui/canvas_i.h b/applications/services/gui/canvas_i.h
+index 30c96b4..b72159e 100644
+--- a/applications/services/gui/canvas_i.h
++++ b/applications/services/gui/canvas_i.h
+@@ -47,6 +47,7 @@ struct Canvas {
+     CompressIcon* compress_icon;
+     CanvasCallbackPairArray_t canvas_callback_pair;
+     FuriMutex* mutex;
++    bool inverted;
+ };
+ 
+ /** Allocate memory and initialize canvas
+@@ -91,6 +92,24 @@ void canvas_set_orientation(Canvas* canvas, CanvasOrientation orientation);
+  */
+ CanvasOrientation canvas_get_orientation(const Canvas* canvas);
+ 
++/** Set canvas output inversion (LJP-OS dark mode)
++ *
++ * Inverts every committed frame on its way to the display and framebuffer
++ * callbacks. The canvas buffer itself is left untouched.
++ *
++ * @param      canvas    Canvas instance
++ * @param      inverted  true to invert output
++ */
++void canvas_set_inverted(Canvas* canvas, bool inverted);
++
++/** Get canvas output inversion
++ *
++ * @param      canvas  Canvas instance
++ *
++ * @return     true if output is inverted
++ */
++bool canvas_is_inverted(const Canvas* canvas);
++
+ /** Draw a u8g2 bitmap
+  *
+  * @param      u8g2     u8g2 instance
+diff --git a/applications/services/gui/gui.c b/applications/services/gui/gui.c
+index 24ea57b..c3c764e 100644
+--- a/applications/services/gui/gui.c
++++ b/applications/services/gui/gui.c
+@@ -1,8 +1,61 @@
+ #include "gui_i.h"
+ #include <assets_icons.h>
++#include <toolbox/saved_struct.h>
++
++#ifdef SRV_STORAGE
++#include <storage/storage.h>
++#endif
+ 
+ #define TAG "GuiSrv"
+ 
++#define GUI_SETTINGS_PATH    INT_PATH(".gui.settings")
++#define GUI_SETTINGS_MAGIC   (0x4C) // 'L', LJP-OS
++#define GUI_SETTINGS_VERSION (1)
++
++typedef struct {
++    bool dark_mode;
++} GuiSettings;
++
++static void gui_settings_load(Gui* gui) {
++    // LJP-OS ships in dark mode until the user turns it off
++    GuiSettings settings = {.dark_mode = true};
++#ifdef SRV_STORAGE
++    GuiSettings loaded;
++    if(saved_struct_load(
++           GUI_SETTINGS_PATH, &loaded, sizeof(loaded), GUI_SETTINGS_MAGIC, GUI_SETTINGS_VERSION)) {
++        settings = loaded;
++    }
++#endif
++    canvas_set_inverted(gui->canvas, settings.dark_mode);
++}
++
++void gui_set_dark_mode(Gui* gui, bool dark_mode) {
++    furi_check(gui);
++
++    gui_lock(gui);
++    canvas_set_inverted(gui->canvas, dark_mode);
++    gui_unlock(gui);
++
++#ifdef SRV_STORAGE
++    GuiSettings settings = {.dark_mode = dark_mode};
++    if(!saved_struct_save(
++           GUI_SETTINGS_PATH,
++           &settings,
++           sizeof(settings),
++           GUI_SETTINGS_MAGIC,
++           GUI_SETTINGS_VERSION)) {
++        FURI_LOG_E(TAG, "Failed to save settings");
++    }
++#endif
++
++    gui_update(gui);
++}
++
++bool gui_get_dark_mode(Gui* gui) {
++    furi_check(gui);
++    return canvas_is_inverted(gui->canvas);
++}
++
+ ViewPort* gui_view_port_find_enabled(ViewPortArray_t array) {
+     // Iterating backward
+     ViewPortArray_it_t it;
+@@ -553,6 +606,10 @@ int32_t gui_srv(void* p) {
+ 
+     furi_record_create(RECORD_GUI, gui);
+ 
++    // After the record exists so nothing waits on us while storage starts,
++    // before the loop so the first frame is already in the right mode
++    gui_settings_load(gui);
++
+     while(1) {
+         uint32_t flags =
+             furi_thread_flags_wait(GUI_THREAD_FLAG_ALL, FuriFlagWaitAny, FuriWaitForever);
+diff --git a/applications/services/gui/gui_i.h b/applications/services/gui/gui_i.h
+index 8bd3215..170b422 100644
+--- a/applications/services/gui/gui_i.h
++++ b/applications/services/gui/gui_i.h
+@@ -103,3 +103,18 @@ void gui_lock(Gui* gui);
+  * @param      gui   The Gui instance
+  */
+ void gui_unlock(Gui* gui);
++
++/** Enable or disable LJP-OS dark mode, save it and redraw
++ *
++ * @param      gui        The Gui instance
++ * @param      dark_mode  true for light-on-dark UI
++ */
++void gui_set_dark_mode(Gui* gui, bool dark_mode);
++
++/** Get LJP-OS dark mode state
++ *
++ * @param      gui   The Gui instance
++ *
++ * @return     true if dark mode is enabled
++ */
++bool gui_get_dark_mode(Gui* gui);
 diff --git a/applications/settings/about/about.c b/applications/settings/about/about.c
 index e066db2..199b8b3 100644
 --- a/applications/settings/about/about.c
@@ -46,6 +237,50 @@ index e066db2..199b8b3 100644
      about_screen_product,
      about_screen_compliance,
      about_screen_address,
+diff --git a/applications/settings/system/system_settings.c b/applications/settings/system/system_settings.c
+index 1197c7f..fa84b4c 100644
+--- a/applications/settings/system/system_settings.c
++++ b/applications/settings/system/system_settings.c
+@@ -2,6 +2,7 @@
+ #include <loader/loader.h>
+ #include <lib/toolbox/value_index.h>
+ #include <locale/locale.h>
++#include <gui/gui_i.h>
+ 
+ const char* const log_level_text[] = {
+     "Default",
+@@ -163,6 +164,18 @@ static void date_format_changed(VariableItem* item) {
+     locale_set_date_format(date_format_value[index]);
+ }
+ 
++const char* const dark_mode_text[] = {
++    "OFF",
++    "ON",
++};
++
++static void dark_mode_changed(VariableItem* item) {
++    SystemSettings* app = variable_item_get_context(item);
++    uint8_t index = variable_item_get_current_value_index(item);
++    variable_item_set_current_value_text(item, dark_mode_text[index]);
++    gui_set_dark_mode(app->gui, index);
++}
++
+ const char* const hand_mode[] = {
+     "Righty",
+     "Lefty",
+@@ -228,6 +241,12 @@ SystemSettings* system_settings_alloc(void) {
+     uint8_t value_index;
+     app->var_item_list = variable_item_list_alloc();
+ 
++    item = variable_item_list_add(
++        app->var_item_list, "Dark Mode", COUNT_OF(dark_mode_text), dark_mode_changed, app);
++    value_index = gui_get_dark_mode(app->gui) ? 1 : 0;
++    variable_item_set_current_value_index(item, value_index);
++    variable_item_set_current_value_text(item, dark_mode_text[value_index]);
++
+     item = variable_item_list_add(
+         app->var_item_list, "Hand Orient", COUNT_OF(hand_mode), hand_orient_changed, app);
+     value_index = furi_hal_rtc_is_flag_set(FuriHalRtcFlagHandOrient) ? 1 : 0;
 diff --git a/fbt_options.py b/fbt_options.py
 index a801c1c..d3b7609 100644
 --- a/fbt_options.py

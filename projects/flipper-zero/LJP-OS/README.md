@@ -23,6 +23,10 @@ Upgrading upstream: change `$UpstreamTag` in `ljp-os.ps1`, delete `firmware/`, a
 ### What LJP-OS changes so far
 - Firmware origin is set to `LJP_OS` (shown by `info` over CLI/qFlipper), and the build suffix to `ljp-os`. The origin has to be a valid C identifier, because the build turns it into a `FW_ORIGIN_<name>` macro, so `LJP-OS` with a hyphen fails to compile
 - Settings → About opens on an LJP-OS screen, and the version page is titled "LJP-OS Version"
+- **Dark mode, on by default.** The whole UI is inverted, so the orange backlight shows through as glowing text and icons on a black screen. It covers menus, apps, the dolphin, and direct-draw games, and qFlipper's screen mirror shows it too. Toggle it in Settings → System → Dark Mode. The setting is saved to `/int/.gui.settings` and survives reboots.
+
+### How dark mode works
+The Flipper's LCD is 1-bit monochrome, so "dark mode" means inverting pixels. The inversion happens in `canvas_commit()` (`applications/services/gui/canvas.c`), the one point every frame passes through. The frame is inverted, sent to the LCD and to framebuffer callbacks (screen streaming), and then flipped back, so apps that keep drawing into the same buffer never see inverted data. The setting lives in the GUI service (`gui_set_dark_mode()` in the private `gui_i.h`), so the public SDK and app compatibility are unchanged.
 
 ## AI's role
 Claude Code planned the fork layout (pinned upstream + patch file, so the showcase repo stays small), wrote the helper script, and made the firmware changes. Upstream's CONTRIBUTING only restricts AI-generated *PRs sent back to them*; a personal fork is fine. GPL-3.0 applies, so LJP-OS stays open source.

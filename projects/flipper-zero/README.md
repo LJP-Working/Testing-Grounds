@@ -18,9 +18,10 @@ Apps are built with `ufbt` (the Flipper micro-build tool) against the Momentum S
 | --- | --- | --- | --- |
 | [hello_flipper](https://github.com/lukepolich/flipper-custom/tree/main/apps/hello_flipper) | App (.fap) | Starter app: a simple counter in the Tools category | 🚧 In progress |
 | [MyPack](https://github.com/lukepolich/flipper-custom/tree/main/asset_packs/MyPack) | Asset pack | Custom "Hello" animation (4 frames, 128×64) for the Momentum UI | 🚧 In progress |
+| [LJP-OS](LJP-OS/) | Firmware | My own Flipper OS: a fork of the official firmware (1.5.1) with LJP-OS branding, kept in this repo as a patch | 🚧 In progress |
 | [BadKB scripts](https://github.com/lukepolich/flipper-custom/tree/main/badusb) | Bad USB | DuckyScript files: open a site, lock the PC, set up a workspace, type boilerplate, show network info | ✅ Working |
 
-As new Flipper projects are built, add a row here and link it to its folder in `flipper-custom`.
+As new Flipper projects are built, add a row here and link it to its folder in `flipper-custom` (or, for LJP-OS, the folder here).
 
 ## AI's role
 Claude Code did the planning and wrote most of the C, the asset-packing script, and the DuckyScript — including the repo layout and build docs in `flipper-custom`. Firmware work is unforgiving (SDK APIs, memory, exact build flags), so it's a good stress test of how well Claude holds up on low-level code.

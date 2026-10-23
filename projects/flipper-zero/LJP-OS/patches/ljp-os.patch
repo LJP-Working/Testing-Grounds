@@ -1,0 +1,71 @@
+diff --git a/applications/settings/about/about.c b/applications/settings/about/about.c
+index e066db2..199b8b3 100644
+--- a/applications/settings/about/about.c
++++ b/applications/settings/about/about.c
+@@ -14,6 +14,26 @@
+ 
+ typedef DialogMessageButton (*AboutDialogScreen)(DialogsApp* dialogs, DialogMessage* message);
+ 
++static DialogMessageButton about_screen_ljp_os(DialogsApp* dialogs, DialogMessage* message) {
++    DialogMessageButton result;
++    const Version* ver = furi_hal_version_get_firmware_version();
++
++    FuriString* screen_text = furi_string_alloc_printf(
++        "Custom Flipper firmware\n"
++        "by LJP-Working\n"
++        "Based on Official %s",
++        ver ? version_get_version(ver) : "?");
++
++    dialog_message_set_header(message, "LJP-OS", 64, 2, AlignCenter, AlignTop);
++    dialog_message_set_text(
++        message, furi_string_get_cstr(screen_text), 64, 20, AlignCenter, AlignTop);
++    result = dialog_message_show(dialogs, message);
++
++    furi_string_free(screen_text);
++
++    return result;
++}
++
+ static DialogMessageButton about_screen_product(DialogsApp* dialogs, DialogMessage* message) {
+     DialogMessageButton result;
+ 
+@@ -188,7 +208,7 @@ static DialogMessageButton about_screen_fw_version(DialogsApp* dialogs, DialogMe
+             version_get_gitbranch(ver));
+     }
+ 
+-    dialog_message_set_header(message, "FW Version Info:", 0, 0, AlignLeft, AlignTop);
++    dialog_message_set_header(message, "LJP-OS Version:", 0, 0, AlignLeft, AlignTop);
+     dialog_message_set_text(message, furi_string_get_cstr(buffer), 0, 13, AlignLeft, AlignTop);
+     result = dialog_message_show(dialogs, message);
+     furi_string_free(buffer);
+@@ -197,6 +217,7 @@ static DialogMessageButton about_screen_fw_version(DialogsApp* dialogs, DialogMe
+ }
+ 
+ const AboutDialogScreen about_screens[] = {
++    about_screen_ljp_os,
+     about_screen_product,
+     about_screen_compliance,
+     about_screen_address,
+diff --git a/fbt_options.py b/fbt_options.py
+index a801c1c..d3b7609 100644
+--- a/fbt_options.py
++++ b/fbt_options.py
+@@ -3,7 +3,8 @@ import posixpath
+ 
+ # For more details on these options, run 'fbt -h'
+ 
+-FIRMWARE_ORIGIN = "Official"
++# Must be a valid C identifier: it becomes the FW_ORIGIN_<name> macro
++FIRMWARE_ORIGIN = "LJP_OS"
+ 
+ # Default hardware target
+ TARGET_HW = 7
+@@ -16,7 +17,7 @@ DEBUG = 1
+ 
+ # Suffix to add to files when building distribution
+ # If OS environment has DIST_SUFFIX set, it will be used instead
+-DIST_SUFFIX = "local"
++DIST_SUFFIX = "ljp-os"
+ 
+ # Coprocessor firmware
+ COPRO_OB_DATA = "scripts/ob.data"

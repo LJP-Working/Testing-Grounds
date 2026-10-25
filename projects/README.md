@@ -9,3 +9,4 @@ One folder per project. To start a new one:
 | Project | Status |
 | --- | --- |
 | [flipper-zero](flipper-zero/) | 🚧 In progress |
+| [home-base](https://github.com/lukepolich/homebase) | ✅ Working |

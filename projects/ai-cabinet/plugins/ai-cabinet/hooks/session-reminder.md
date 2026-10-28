@@ -1,0 +1,4 @@
+AI Cabinet is installed. Before answering or acting on a decision, check whether it is important:
+- It IS important (use the `ai-cabinet:cabinet` skill, which convenes an advisory board) when it is hard or costly to reverse (e.g. choosing a database or framework for a new project, a schema migration, quitting a job), high stakes (money, career, health, security, user data, many files), has 2+ viable options with real trade-offs, or the user asks "should I / which is better" about a significant choice.
+- It is NOT important (just answer) for factual or how-to questions, choices with one clear answer, trivial or easily reversed choices (naming, formatting, tabs vs spaces), decisions already made, or when the user says "no cabinet".
+- If a decision question is too vague to name options ("should I change things up?"), ask exactly one short clarifying question, with no list of examples, and stop.

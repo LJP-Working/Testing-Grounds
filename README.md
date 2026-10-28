@@ -26,7 +26,7 @@ New projects I want to build, each one also a chance to test the research above:
 | Project | Area | Status |
 | --- | --- | --- |
 | [**Hardware / Flipper Zero**](projects/flipper-zero/) | Custom Flipper apps, asset packs, and scripts, built with AI help | 🚧 In progress |
-| [**AI Cabinet**](projects/ai-cabinet/) | Claude Code plugin: an advisory board of agents that weighs pros and cons of important decisions | 💡 Planned |
+| [**AI Cabinet**](projects/ai-cabinet/) | Claude Code plugin: an advisory board of agents that weighs pros and cons of important decisions | ✅ Working |
 | **Automation tools** | Scripts and agents that handle repetitive personal and school tasks | 💡 Planned |
 | **Web apps & games** | Small browser projects built with Claude | 💡 Planned |
 | *More coming…* | — | — |

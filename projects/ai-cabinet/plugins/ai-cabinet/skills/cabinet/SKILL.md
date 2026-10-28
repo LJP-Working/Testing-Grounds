@@ -1,11 +1,16 @@
 ---
 name: cabinet
+argument-hint: "[--save] <question>"
 description: Use whenever the user asks which option to choose on a significant decision ("should I use SQLite or Postgres?", "which job offer should I take?", "should I change things up?"), and before committing to any important decision yourself, coding or personal - hard or costly to reverse, high stakes (money, career, health, security, user data, many files/systems), multiple viable options with real trade-offs, or the user asks "should I / which is better" about a significant choice. Convenes an advisory board of independent agents that weighs pros and cons and returns a verdict. Not for factual questions, obvious answers, trivial or easily reversed choices, decisions already made, or when the user says no cabinet.
 ---
 
 # AI Cabinet
 
 An advisory board for important decisions. Independent advisors each weigh the pros and cons of every option, then a Chair delivers a reasoned verdict.
+
+## Manual use: `/cabinet [--save] <question>`
+
+When the user runs `/cabinet` themselves, **always convene**: skip the importance check below, even for a small question. Strip `--save` from the arguments; if it was present, save the result (Procedure step 6). The rest of the arguments is the question.
 
 ## When to convene
 

@@ -1,0 +1,11 @@
+{
+  "name": "ai-cabinet",
+  "owner": { "name": "Luke Polich" },
+  "plugins": [
+    {
+      "name": "ai-cabinet",
+      "source": "./plugins/ai-cabinet",
+      "description": "An advisory board of independent AI agents for important decisions."
+    }
+  ]
+}

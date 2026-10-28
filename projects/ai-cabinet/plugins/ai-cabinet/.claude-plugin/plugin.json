@@ -1,0 +1,6 @@
+{
+  "name": "ai-cabinet",
+  "version": "0.1.0",
+  "description": "An advisory board of independent AI agents that weighs the pros and cons of important decisions, coding or personal, and delivers a reasoned verdict.",
+  "author": { "name": "Luke Polich" }
+}
